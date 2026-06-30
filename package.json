@@ -1,0 +1,1 @@
+{"name": "ntf-hubspot-sync", "version": "1.0.0", "private": true, "description": "Puente HubSpot -> Firestore para NuncaTeFalla", "dependencies": {"firebase-admin": "^12.7.0"}}
