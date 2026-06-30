@@ -22,7 +22,6 @@
 const admin = require('firebase-admin');
 const CITIES = require('../cities-data.js');
 
-// --- Inicializacion de Firebase Admin (una sola vez, reutilizada entre invocaciones) ---
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
@@ -31,11 +30,6 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- Helpers ---
-
-// Busca una ciudad dentro de un departamento y devuelve {lat, lng} o null.
-// Hace match case-insensitive e ignorando tildes, para tolerar pequenas
-// diferencias entre como HubSpot guarda el label y como esta en CITIES.
 function findCityCoords(departamentoSlug, cityLabel) {
   if (!departamentoSlug || !cityLabel) return null;
   const list = CITIES[departamentoSlug];
@@ -46,7 +40,7 @@ function findCityCoords(departamentoSlug, cityLabel) {
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
-      .replace(/\s*\([^)]*\)\s*/g, '') // quita el "(Durazno)" / "(Rocha)" de desambiguacion
+      .replace(/\s*\([^)]*\)\s*/g, '')
       .trim();
 
   const target = normalize(cityLabel);
@@ -54,16 +48,10 @@ function findCityCoords(departamentoSlug, cityLabel) {
   return found ? { lat: found.lat, lng: found.lng } : null;
 }
 
-// Valida que el request traiga el secreto compartido correcto.
-// El Workflow de HubSpot lo manda como query param (?secret=...) en la URL
-// del webhook, configurado a mano una sola vez.
 function isValidRequest(req) {
   const provided = req.query && req.query.secret;
   return Boolean(provided) && provided === process.env.HUBSPOT_WEBHOOK_SECRET;
-}
-
-// Mapea las propiedades de HubSpot al documento que guardamos en Firestore.
-function mapToFirestoreDoc(contactId, props) {
+}function mapToFirestoreDoc(contactId, props) {
   const servicios = props.nf_servicios
     ? props.nf_servicios.split(';').map((s) => s.trim()).filter(Boolean)
     : [];
@@ -72,4 +60,51 @@ function mapToFirestoreDoc(contactId, props) {
 
   return {
     hubspotContactId: String(contactId),
-    nombre:
+    nombre: [props.firstname, props.lastname].filter(Boolean).join(' ') || null,
+    email: props.email || null,
+    telefono: props.phone || null,
+    direccion: props.address || null,
+    tipoContacto: props.nf_tipo_contacto || null,
+    servicios,
+    departamento: props.nf_departamento || null,
+    ciudad: props.nf_ciudad || null,
+    ciudadLat: coords ? coords.lat : null,
+    ciudadLng: coords ? coords.lng : null,
+    radioCobertura: props.nf_radio_cobertura || null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+
+module.exports = async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  if (!isValidRequest(req)) {
+    res.status(401).json({ error: 'Secreto invalido o faltante' });
+    return;
+  }
+
+  const props = req.body || {};
+  const contactId = props.contactId;
+
+  if (!contactId) {
+    res.status(400).json({ error: 'Falta contactId en el body' });
+    return;
+  }
+
+  try {
+    if (props.nf_tipo_contacto !== 'profesional') {
+      res.status(200).json({ contactId, skipped: true, reason: 'no es profesional' });
+      return;
+    }
+
+    const doc = mapToFirestoreDoc(contactId, props);
+    await db.collection('profesionales').doc(String(contactId)).set(doc, { merge: true });
+
+    res.status(200).json({ contactId, synced: true });
+  } catch (err) {
+    res.status(500).json({ contactId, error: err.message });
+  }
+};
